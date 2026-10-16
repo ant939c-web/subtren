@@ -10,6 +10,7 @@ Editor de música que corre en el navegador. No hay que instalar nada: abre `ind
 - **Volumen y forma**: ganancia, normalizar, fade in, fade out, al revés y cambio de velocidad.
 - **Efectos**: eco, reverb, slowed + reverb, más bajo, más brillo, bajo el agua, teléfono, distorsión, robot, audio 8D, ardilla y demonio.
 - **Loop** de la selección, zoom en la onda y atajos de teclado.
+- **Masterizar** la canción con un botón: estilos Suave, Con fuerza y Radio, volumen final en LUFS y comparación con el original.
 - **Exportar** el resultado como WAV.
 
 Los efectos se aplican a lo que tengas seleccionado; si no hay nada seleccionado, a toda la canción.
