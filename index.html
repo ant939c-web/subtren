@@ -154,7 +154,7 @@ kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1
       <label class="btn primary" for="fileIn">
         <svg class="i" viewBox="0 0 24 24"><path d="M12 3l5 5h-3v6h-4V8H7l5-5zm-8 14h16v4H4v-4z"/></svg>
         Abrir canción
-        <input type="file" id="fileIn" accept="audio/*,video/*">
+        <input type="file" id="fileIn">
       </label>
       <button id="sampleBtn" type="button">Beat de ejemplo</button>
       <button id="exportBtn" type="button">
@@ -247,7 +247,7 @@ kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1
       <div class="row">
         <label class="btn" for="appendIn">
           Añadir otra canción al final
-          <input type="file" id="appendIn" accept="audio/*,video/*">
+          <input type="file" id="appendIn">
         </label>
       </div>
       <p class="note">Atajos: <kbd>Espacio</kbd> tocar · <kbd>Ctrl Z</kbd> deshacer · <kbd>Ctrl X</kbd> <kbd>C</kbd> <kbd>V</kbd> · <kbd>Supr</kbd> borrar · <kbd>Ctrl A</kbd> todo</p>
@@ -714,7 +714,7 @@ async function loadFile(file, append) {
     }
   } catch (e) {
     console.error(e);
-    toast("No pude abrir ese archivo. Prueba con MP3, WAV, M4A u OGG.");
+    toast(`No pude abrir "${file.name}". Tiene que ser una canción en MP3, M4A, WAV o AAC.`, 6000);
   } finally { setBusy(false); }
 }
 
@@ -1074,9 +1074,9 @@ function refreshButtons() {
 function refresh() { refreshButtons(); draw(); updateClock(); }
 function setBusy(v) { busy = v; $("#busy").hidden = !v; refreshButtons(); }
 let toastT;
-function toast(msg) {
+function toast(msg, ms = 2200) {
   const t = $("#toast"); t.textContent = msg; t.classList.add("show");
-  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 2200);
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), ms);
 }
 
 const grid = $("#fxGrid");
