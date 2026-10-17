@@ -126,6 +126,8 @@ svg.i { width: 16px; height: 16px; flex: none; fill: currentColor; }
 .master-grid > div { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .meter { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--f-mono); font-size: 13px; font-variant-numeric: tabular-nums; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
 .meter b { color: var(--wave); font-weight: 600; }
+.progress { height: 8px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+.progress > div { height: 100%; width: 0; background: var(--wave); transition: width .15s; }
 .note { font-size: 13px; color: var(--muted); margin: 0; max-width: 65ch; }
 .sep { height: 1px; background: var(--line); }
 kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
@@ -279,6 +281,28 @@ kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1
         <button type="button" id="speedBtn" class="primary">Aplicar velocidad</button>
       </div>
       <p class="note">Más rápido suena más agudo (tipo ardilla); más lento, más grave.</p>
+    </section>
+
+    <section class="panel wide" aria-labelledby="vTitle">
+      <h2 id="vTitle">Voz y pista</h2>
+      <div class="master-grid">
+        <div>
+          <p class="note">Selecciona el pedazo donde quieres que se pare la pista y quede sonando solo la voz. Si no seleccionas nada, se aplica a toda la canción.</p>
+          <div class="row">
+            <button type="button" id="voxOnlyBtn" class="primary">Solo la voz (se para la pista)</button>
+            <button type="button" id="voxOutBtn">Quitar la voz (karaoke)</button>
+          </div>
+          <div class="progress" id="voxProg" hidden><div></div></div>
+        </div>
+        <div>
+          <div class="slider">
+            <label for="voxClean">Limpieza</label>
+            <input type="range" id="voxClean" min="0.5" max="2.5" step="0.1" value="1">
+            <output id="voxCleanOut" for="voxClean">1.0</output>
+          </div>
+          <p class="note">Más limpieza quita más beat, pero la voz puede sonar más metálica. Funciona mejor cuando la voz está en el centro de la mezcla, como en la mayoría de las canciones. No queda perfecto como en un estudio: puede quedar algo del beat de fondo.</p>
+        </div>
+      </div>
     </section>
 
     <section class="panel wide">
@@ -691,6 +715,133 @@ function toggleAB() {
   if (player.playing) { const pos = playPos(); stopPlayback(); if (pos != null) cursor = pos; play(); }
 }
 
+/* ---------- Separar voz y pista ----------
+   Corre en un Worker. Para cada pedacito de tiempo y cada frecuencia decide cuánto es voz:
+   la voz suele estar en el centro (igual en L y R), es sostenida (no golpe de batería)
+   y vive entre ~120 Hz y ~10 kHz. */
+function vocalWorker() {
+  const N = 4096, HOP = 1024, B = N / 2 + 1, W = 9, HW = 4;
+  const cosT = new Float64Array(N / 2), sinT = new Float64Array(N / 2);
+  for (let i = 0; i < N / 2; i++) { cosT[i] = Math.cos((2 * Math.PI * i) / N); sinT[i] = Math.sin((2 * Math.PI * i) / N); }
+  const bits = Math.log2(N), rev = new Uint32Array(N);
+  for (let i = 0; i < N; i++) { let r = 0, x = i; for (let b = 0; b < bits; b++) { r = (r << 1) | (x & 1); x >>= 1; } rev[i] = r; }
+  function fft(re, im, inv) {
+    for (let i = 0; i < N; i++) { const j = rev[i]; if (j > i) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (let size = 2; size <= N; size <<= 1) {
+      const half = size >> 1, step = N / size;
+      for (let i = 0; i < N; i += size) {
+        for (let j = 0, k = 0; j < half; j++, k += step) {
+          const c = cosT[k], s = inv ? sinT[k] : -sinT[k], a = i + j, b = a + half;
+          const tr = re[b] * c - im[b] * s, ti = re[b] * s + im[b] * c;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        }
+      }
+    }
+  }
+  function median(a, n) {
+    for (let i = 1; i < n; i++) { const v = a[i]; let j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
+    return a[n >> 1];
+  }
+  self.onmessage = (e) => {
+    const { L, R, rate, clean } = e.data, len = L.length, P = len + 2 * N;
+    const Lp = new Float32Array(P), Rp = new Float32Array(P);
+    Lp.set(L, N); Rp.set(R, N);
+    const F = Math.floor((P - N) / HOP) + 1, out = new Float32Array(P);
+    const win = new Float64Array(N);
+    for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N);
+    const ring = Array.from({ length: W }, () => ({ re: new Float32Array(B), im: new Float32Array(B), mag: new Float32Array(B), cm: new Float32Array(B) }));
+    const band = new Float32Array(B);
+    for (let k = 0; k < B; k++) {
+      const f = (k * rate) / N;
+      const lo = f < 80 ? 0 : f > 160 ? 1 : (f - 80) / 80, hi = f < 8000 ? 1 : f > 12000 ? 0 : 1 - (f - 8000) / 4000;
+      band[k] = lo * hi;
+    }
+    const re = new Float64Array(N), im = new Float64Array(N), tmp = new Float32Array(W), H = new Float32Array(B);
+    for (let f = 0; f < F + HW; f++) {
+      if (f < F) {
+        const fr = ring[f % W], o = f * HOP;
+        for (let i = 0; i < N; i++) { re[i] = Lp[o + i] * win[i]; im[i] = Rp[o + i] * win[i]; }
+        fft(re, im, false);
+        for (let k = 0; k < B; k++) {
+          const nk = (N - k) % N;
+          const lr = (re[k] + re[nk]) / 2, li = (im[k] - im[nk]) / 2;
+          const rr = (im[k] + im[nk]) / 2, ri = (re[nk] - re[k]) / 2;
+          const mr = (lr + rr) / 2, mi = (li + ri) / 2, mag = Math.hypot(mr, mi);
+          fr.re[k] = mr; fr.im[k] = mi; fr.mag[k] = mag;
+          const raw = 1 - Math.hypot(lr - rr, li - ri) / (2 * mag + 1e-9);
+          fr.cm[k] = Math.min(1, Math.max(0, (raw - 0.5) / 0.45));
+        }
+      }
+      const t = f - HW;
+      if (t < 0 || t >= F) continue;
+      const cur = ring[t % W], t0 = Math.max(0, t - HW), cnt = Math.min(F - 1, t + HW) - t0 + 1;
+      for (let k = 0; k < B; k++) {
+        for (let j = 0; j < cnt; j++) tmp[j] = ring[(t0 + j) % W].mag[k];
+        H[k] = median(tmp, cnt);
+      }
+      for (let k = 0; k < B; k++) {
+        const k0 = Math.max(0, k - HW), kc = Math.min(B - 1, k + HW) - k0 + 1;
+        for (let j = 0; j < kc; j++) tmp[j] = cur.mag[k0 + j];
+        const Pm = median(tmp, kc), h2 = H[k] * H[k];
+        const m = Math.pow(cur.cm[k] * (h2 / (h2 + Pm * Pm + 1e-12)) * band[k], clean);
+        re[k] = cur.re[k] * m; im[k] = cur.im[k] * m;
+      }
+      im[0] = 0; im[N / 2] = 0;
+      for (let k = B; k < N; k++) { re[k] = re[N - k]; im[k] = -im[N - k]; }
+      fft(re, im, true);
+      const o = t * HOP;
+      for (let i = 0; i < N; i++) out[o + i] += (re[i] / N) * win[i] / 1.5;
+      if (t % 150 === 0) self.postMessage({ progress: t / F });
+    }
+    const V = out.slice(N, N + len);
+    self.postMessage({ V }, [V.buffer]);
+  };
+}
+let vocalURL = null;
+function runVocal(L, R, rate, clean, onProg) {
+  return new Promise((resolve, reject) => {
+    if (!vocalURL) vocalURL = URL.createObjectURL(new Blob(["(" + vocalWorker.toString() + ")()"], { type: "text/javascript" }));
+    const w = new Worker(vocalURL);
+    w.onmessage = (e) => {
+      if (e.data.V) { w.terminate(); resolve(e.data.V); }
+      else onProg(e.data.progress);
+    };
+    w.onerror = (err) => { w.terminate(); reject(err); };
+    w.postMessage({ L, R, rate, clean }, [L.buffer, R.buffer]);
+  });
+}
+async function doVocal(mode) {
+  if (!buf || busy) return;
+  const [s0, s1] = range();
+  if (s1 - s0 < 2) return;
+  const rate = sr(), pad = 8192, a0 = Math.max(0, s0 - pad), a1 = Math.min(buf.length, s1 + pad);
+  const prog = $("#voxProg"), bar = prog.firstElementChild;
+  setBusy(true, "Separando la voz… 0%");
+  prog.hidden = false; bar.style.width = "0%";
+  try {
+    const V = await runVocal(buf.getChannelData(0).slice(a0, a1), buf.getChannelData(1).slice(a0, a1), rate, +$("#voxClean").value, (p) => {
+      const pc = Math.round(p * 100) + "%";
+      bar.style.width = pc; $("#busy").textContent = "Separando la voz… " + pc;
+    });
+    // En los bordes de la selección se mezcla 20 ms para que el corte no haga clic.
+    const o = mk(2, buf.length, rate), fade = sel ? Math.round(rate * 0.02) : 0;
+    for (let c = 0; c < 2; c++) {
+      const d = o.getChannelData(c), src = buf.getChannelData(c);
+      d.set(src);
+      for (let i = s0; i < s1; i++) {
+        const v = V[i - a0], proc = mode === "solo" ? v : src[i] - v;
+        const w = fade ? Math.min(1, (i - s0) / fade, (s1 - 1 - i) / fade) : 1;
+        d[i] = src[i] * (1 - w) + proc * w;
+      }
+    }
+    commit(o, mode === "solo" ? "Listo: solo la voz" : "Listo: sin voz", sel);
+  } catch (e) {
+    console.error(e); toast("No se pudo separar la voz en este teléfono", 4000);
+  } finally {
+    prog.hidden = true; setBusy(false);
+  }
+}
+
 /* ---------- Loading ---------- */
 async function loadFile(file, append) {
   if (!file) return;
@@ -1069,10 +1220,10 @@ function refreshButtons() {
   abB.textContent = abOrig ? "Escuchar masterizada" : "Escuchar original";
   abB.setAttribute("aria-pressed", String(abOrig));
   abB.classList.toggle("on", abOrig);
-  for (const b of document.querySelectorAll("#fxGrid button, #gainBtn, #normBtn, #fadeInBtn, #fadeOutBtn, #revBtn, #speedBtn, #exportBtn, #allBtn")) b.disabled = !has || busy;
+  for (const b of document.querySelectorAll("#fxGrid button, #gainBtn, #normBtn, #fadeInBtn, #fadeOutBtn, #revBtn, #speedBtn, #exportBtn, #allBtn, #voxOnlyBtn, #voxOutBtn")) b.disabled = !has || busy;
 }
 function refresh() { refreshButtons(); draw(); updateClock(); }
-function setBusy(v) { busy = v; $("#busy").hidden = !v; refreshButtons(); }
+function setBusy(v, text) { busy = v; const b = $("#busy"); b.textContent = text || "Procesando…"; b.hidden = !v; refreshButtons(); }
 let toastT;
 function toast(msg, ms = 2200) {
   const t = $("#toast"); t.textContent = msg; t.classList.add("show");
@@ -1104,6 +1255,9 @@ for (const p of MASTER) {
 }
 $("#lufsIn").addEventListener("input", showLufs);
 $("#masterBtn").onclick = masterize;
+$("#voxOnlyBtn").onclick = () => doVocal("solo");
+$("#voxOutBtn").onclick = () => doVocal("sin");
+$("#voxClean").addEventListener("input", (e) => { $("#voxCleanOut").textContent = (+e.target.value).toFixed(1); });
 $("#abBtn").onclick = toggleAB;
 
 $("#fileIn").addEventListener("change", (e) => { loadFile(e.target.files[0], false); e.target.value = ""; });
