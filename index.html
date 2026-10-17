@@ -133,6 +133,9 @@ svg.i { width: 16px; height: 16px; flex: none; fill: currentColor; }
 .steps a, .note a { color: var(--wave); }
 .acap-status { margin: 0; font-size: 13px; padding: 8px 10px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); }
 .acap-status.ok { color: var(--fg); border-color: var(--wave); }
+.vh { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+#aiRun { display: flex; flex-direction: column; gap: 8px; }
+.ai-run-row { align-items: center; justify-content: space-between; }
 .note { font-size: 13px; color: var(--muted); margin: 0; max-width: 65ch; }
 .sep { height: 1px; background: var(--line); }
 kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
@@ -292,24 +295,41 @@ kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1
       <h2 id="vTitle">Voz y pista</h2>
       <div class="master-grid">
         <div>
+          <input type="file" id="acapIn" class="vh" tabindex="-1">
+          <div id="aiBox" hidden>
+            <p class="note">La inteligencia artificial separa la voz aquí mismo, sin otras apps. Selecciona el pedazo donde quieres que se pare la pista y dale a <b>Solo la voz</b>. Si no seleccionas nada, separa la canción completa.</p>
+            <p class="acap-status ok" id="aiStatus">Inteligencia artificial: lista. La primera vez baja 174 MB y después queda guardada.</p>
+          </div>
+          <div id="acapBox">
           <p class="note">Para que la voz quede limpia de verdad, sin nada del beat:</p>
           <ol class="steps">
             <li>Saca la voz de tu canción con una app de inteligencia artificial gratis, como <a href="https://vocalremover.org" target="_blank" rel="noopener">vocalremover.org</a> o la app Moises. Baja el archivo de la voz (dice "vocals" o "acapella").</li>
             <li>Cárgalo aquí:
-              <label class="btn" for="acapIn">Cargar voz limpia
-                <input type="file" id="acapIn">
-              </label>
+              <label class="btn" for="acapIn">Cargar voz limpia</label>
             </li>
             <li>Selecciona el pedazo donde quieres que se pare la pista y dale a <b>Solo la voz</b>.</li>
           </ol>
           <p class="acap-status" id="acapStatus">Voz limpia: no cargada. Sin ella se usa el modo rápido, que deja algo del beat.</p>
+          </div>
           <div class="row">
             <button type="button" id="voxOnlyBtn" class="primary">Solo la voz (se para la pista)</button>
             <button type="button" id="voxOutBtn">Quitar la voz (karaoke)</button>
           </div>
+          <div id="aiRun" hidden>
+            <div class="progress" id="voxProgAI"><div></div></div>
+            <div class="row ai-run-row">
+              <span class="note" id="aiMsg">Preparando…</span>
+              <button type="button" id="aiCancel">Cancelar</button>
+            </div>
+          </div>
           <div class="progress" id="voxProg" hidden><div></div></div>
         </div>
-        <div>
+        <div id="aiSide" hidden>
+          <p class="note">Usa Demucs, la misma inteligencia artificial que usan las apps para separar voces. Corre en tu teléfono o computadora, no se sube nada a internet. Con tarjeta gráfica tarda más o menos lo que dura el pedazo; sin ella puede tardar varios minutos.</p>
+          <p class="note">¿Ya tienes la voz aparte? <label class="btn" for="acapIn">Cargar voz limpia</label></p>
+          <p class="acap-status" id="acapStatus2" hidden></p>
+        </div>
+        <div id="rapidBox">
           <div class="slider">
             <label for="voxClean">Limpieza (modo rápido)</label>
             <input type="range" id="voxClean" min="0.5" max="2.5" step="0.1" value="1">
@@ -906,6 +926,9 @@ async function loadAcap(file) {
     const st = $("#acapStatus");
     st.textContent = `Voz limpia: ${file.name} (${fmt(acap.duration)}). Ahora "Solo la voz" la usa.`;
     st.classList.add("ok");
+    const st2 = $("#acapStatus2");
+    st2.textContent = `Usando tu voz limpia: ${file.name}. Para volver a la inteligencia artificial, abre la canción otra vez.`;
+    st2.hidden = false; st2.classList.add("ok");
     toast("Voz limpia cargada");
   } catch (e) {
     console.error(e);
@@ -917,6 +940,7 @@ function clearAcap() {
   const st = $("#acapStatus");
   st.textContent = "Voz limpia: no cargada. Sin ella se usa el modo rápido, que deja algo del beat.";
   st.classList.remove("ok");
+  $("#acapStatus2").hidden = true;
 }
 async function applyAcap(mode) {
   const [s0, s1] = range(), rate = sr();
@@ -944,9 +968,106 @@ async function applyAcap(mode) {
     console.error(e); toast("No se pudo poner la voz", 4000);
   } finally { setBusy(false); }
 }
+/* ---------- Inteligencia artificial (Demucs) ----------
+   Solo existe en la página web: busca modelo/manifest.json junto a la página. */
+let aiOK = false, aiWorker = null, aiPending = null, aiCache = null;
+fetch("modelo/manifest.json")
+  .then((r) => (r.ok ? r.json() : null))
+  .then((m) => { if (m && m.parts && "Worker" in window) { aiOK = true; showAIUI(); } })
+  .catch(() => {});
+function showAIUI() {
+  $("#aiBox").hidden = !aiOK;
+  $("#aiSide").hidden = !aiOK;
+  $("#acapBox").hidden = aiOK;
+  $("#rapidBox").hidden = aiOK;
+}
+function getAIWorker() {
+  if (!aiWorker) {
+    aiWorker = new Worker("demucs/worker.js", { type: "module" });
+    aiWorker.onmessage = (e) => aiPending && aiPending.onmsg(e.data);
+    aiWorker.onerror = (e) => {
+      const p = aiPending; aiPending = null;
+      if (aiWorker) aiWorker.terminate();
+      aiWorker = null;
+      if (p) p.reject(new Error(e.message || "La inteligencia artificial no pudo arrancar en este navegador"));
+    };
+  }
+  return aiWorker;
+}
+function runAI(L, R, onProg) {
+  return new Promise((resolve, reject) => {
+    aiPending = {
+      reject,
+      onmsg: (m) => {
+        if (m.type === "progress") onProg(m);
+        else if (m.type === "done") { aiPending = null; resolve(m); }
+        else if (m.type === "error") { aiPending = null; reject(new Error(m.message)); }
+      },
+    };
+    getAIWorker().postMessage({ L, R }, [L.buffer, R.buffer]);
+  });
+}
+function cancelAI() {
+  if (aiWorker) { aiWorker.terminate(); aiWorker = null; }
+  if (aiPending) { const p = aiPending; aiPending = null; p.reject(new Error("cancelado")); }
+}
+async function resample2(L, R, from, to) {
+  if (from === to) return [L, R];
+  const b = mk(2, L.length, from);
+  b.copyToChannel(L, 0); b.copyToChannel(R, 1);
+  const r = await matchRate(b, to);
+  return [r.getChannelData(0), r.getChannelData(1)];
+}
+async function applyAI(mode) {
+  const [s0, s1] = range(), rate = sr(), margin = Math.round(rate * 1);
+  const a0 = Math.max(0, s0 - margin), a1 = Math.min(buf.length, s1 + margin);
+  const box = $("#aiRun"), bar = $("#voxProgAI").firstElementChild, msg = $("#aiMsg");
+  const show = (text, p) => { msg.textContent = text; bar.style.width = Math.round(p * 100) + "%"; $("#busy").textContent = text; };
+  setBusy(true, "Preparando la inteligencia artificial…");
+  box.hidden = false; show("Preparando la inteligencia artificial…", 0);
+  try {
+    let st = aiCache && aiCache.buf === buf && aiCache.a0 === a0 && aiCache.a1 === a1 ? aiCache : null;
+    if (!st) {
+      const [L, R] = await resample2(buf.getChannelData(0).slice(a0, a1), buf.getChannelData(1).slice(a0, a1), rate, 44100);
+      const t0 = performance.now();
+      const r = await runAI(L.slice(), R.slice(), (m) => {
+        if (m.phase === "download") show(`Bajando la inteligencia artificial (solo la primera vez): ${Math.round(m.p * 100)}% de ${Math.round(m.total / 1e6)} MB`, m.p);
+        else if (m.phase === "load") show("Preparando la inteligencia artificial…", 1);
+        else {
+          const pc = Math.round(m.p * 100);
+          const el = (performance.now() - t0) / 1000;
+          const left = m.p > 0.05 ? ` · faltan ~${Math.max(1, Math.round((el / m.p) * (1 - m.p)))} s` : "";
+          show(`Separando la voz${m.device === "gpu" ? " (tarjeta gráfica)" : " (procesador, puede tardar)"}: ${pc}%${left}`, m.p);
+        }
+      });
+      const [vL, vR] = await resample2(r.vL, r.vR, 44100, rate);
+      const [iL, iR] = await resample2(r.iL, r.iR, 44100, rate);
+      st = aiCache = { buf, a0, a1, v: [vL, vR], ins: [iL, iR] };
+    }
+    const o = mk(2, buf.length, rate), fade = sel ? Math.round(rate * 0.02) : 0;
+    for (let c = 0; c < 2; c++) {
+      const d = o.getChannelData(c), src = buf.getChannelData(c), stem = mode === "solo" ? st.v[c] : st.ins[c];
+      d.set(src);
+      for (let i = s0; i < s1; i++) {
+        const k = i - a0, proc = k < stem.length ? stem[k] : 0;
+        const w = fade ? Math.min(1, (i - s0) / fade, (s1 - 1 - i) / fade) : 1;
+        d[i] = src[i] * (1 - w) + proc * w;
+      }
+    }
+    commit(o, mode === "solo" ? "Listo: solo la voz" : "Listo: sin voz", sel);
+  } catch (e) {
+    console.error(e);
+    if (e.message !== "cancelado") toast("No se pudo: " + e.message, 7000);
+    else toast("Cancelado");
+  } finally {
+    box.hidden = true; setBusy(false);
+  }
+}
+
 async function doVocal(mode) {
   if (!buf || busy) return;
   if (acap) return applyAcap(mode);
+  if (aiOK) return applyAI(mode);
   const [s0, s1] = range();
   if (s1 - s0 < 2) return;
   const rate = sr(), pad = 8192, a0 = Math.max(0, s0 - pad), a1 = Math.min(buf.length, s1 + pad);
@@ -1392,6 +1513,7 @@ for (const p of MASTER) {
 $("#lufsIn").addEventListener("input", showLufs);
 $("#masterBtn").onclick = masterize;
 $("#acapIn").addEventListener("change", (e) => { loadAcap(e.target.files[0]); e.target.value = ""; });
+$("#aiCancel").onclick = cancelAI;
 $("#voxOnlyBtn").onclick = () => doVocal("solo");
 $("#voxOutBtn").onclick = () => doVocal("sin");
 $("#voxClean").addEventListener("input", (e) => { $("#voxCleanOut").textContent = (+e.target.value).toFixed(1); });

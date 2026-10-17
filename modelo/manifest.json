@@ -1,0 +1,22 @@
+{
+ "version": "htdemucs-1",
+ "total": 174263526,
+ "parts": [
+  {
+   "file": "htdemucs.onnx.part0",
+   "size": 45000000
+  },
+  {
+   "file": "htdemucs.onnx.part1",
+   "size": 45000000
+  },
+  {
+   "file": "htdemucs.onnx.part2",
+   "size": 45000000
+  },
+  {
+   "file": "htdemucs.onnx.part3",
+   "size": 39263526
+  }
+ ]
+}
