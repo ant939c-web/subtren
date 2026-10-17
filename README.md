@@ -11,7 +11,7 @@ Editor de música que corre en el navegador. No hay que instalar nada: abre `ind
 - **Efectos**: eco, reverb, slowed + reverb, más bajo, más brillo, bajo el agua, teléfono, distorsión, robot, audio 8D, ardilla y demonio.
 - **Loop** de la selección, zoom en la onda y atajos de teclado.
 - **Masterizar** la canción con un botón: estilos Suave, Con fuerza y Radio, volumen final en LUFS y comparación con el original.
-- **Voz y pista**: dejar solo la voz en un pedazo (la pista se para) o quitar la voz para hacer karaoke.
+- **Voz y pista**: carga la voz limpia (sacada con una app de IA como vocalremover.org o Moises) y el editor la alinea sola y la deja sonando sin beat en el pedazo que escojas. También puede quitar la voz para karaoke. Sin la voz limpia hay un modo rápido que deja algo del beat.
 - **Exportar** el resultado como WAV.
 
 Los efectos se aplican a lo que tengas seleccionado; si no hay nada seleccionado, a toda la canción.

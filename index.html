@@ -128,6 +128,11 @@ svg.i { width: 16px; height: 16px; flex: none; fill: currentColor; }
 .meter b { color: var(--wave); font-weight: 600; }
 .progress { height: 8px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
 .progress > div { height: 100%; width: 0; background: var(--wave); transition: width .15s; }
+.steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; max-width: 65ch; }
+.steps li .btn { margin-top: 6px; }
+.steps a, .note a { color: var(--wave); }
+.acap-status { margin: 0; font-size: 13px; padding: 8px 10px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); }
+.acap-status.ok { color: var(--fg); border-color: var(--wave); }
 .note { font-size: 13px; color: var(--muted); margin: 0; max-width: 65ch; }
 .sep { height: 1px; background: var(--line); }
 kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
@@ -287,7 +292,17 @@ kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1
       <h2 id="vTitle">Voz y pista</h2>
       <div class="master-grid">
         <div>
-          <p class="note">Selecciona el pedazo donde quieres que se pare la pista y quede sonando solo la voz. Si no seleccionas nada, se aplica a toda la canción.</p>
+          <p class="note">Para que la voz quede limpia de verdad, sin nada del beat:</p>
+          <ol class="steps">
+            <li>Saca la voz de tu canción con una app de inteligencia artificial gratis, como <a href="https://vocalremover.org" target="_blank" rel="noopener">vocalremover.org</a> o la app Moises. Baja el archivo de la voz (dice "vocals" o "acapella").</li>
+            <li>Cárgalo aquí:
+              <label class="btn" for="acapIn">Cargar voz limpia
+                <input type="file" id="acapIn">
+              </label>
+            </li>
+            <li>Selecciona el pedazo donde quieres que se pare la pista y dale a <b>Solo la voz</b>.</li>
+          </ol>
+          <p class="acap-status" id="acapStatus">Voz limpia: no cargada. Sin ella se usa el modo rápido, que deja algo del beat.</p>
           <div class="row">
             <button type="button" id="voxOnlyBtn" class="primary">Solo la voz (se para la pista)</button>
             <button type="button" id="voxOutBtn">Quitar la voz (karaoke)</button>
@@ -296,11 +311,11 @@ kbd { font-family: var(--f-mono); font-size: 11.5px; padding: 1px 5px; border: 1
         </div>
         <div>
           <div class="slider">
-            <label for="voxClean">Limpieza</label>
+            <label for="voxClean">Limpieza (modo rápido)</label>
             <input type="range" id="voxClean" min="0.5" max="2.5" step="0.1" value="1">
             <output id="voxCleanOut" for="voxClean">1.0</output>
           </div>
-          <p class="note">Más limpieza quita más beat, pero la voz puede sonar más metálica. Funciona mejor cuando la voz está en el centro de la mezcla, como en la mayoría de las canciones. No queda perfecto como en un estudio: puede quedar algo del beat de fondo.</p>
+          <p class="note">El modo rápido se usa solo si no cargaste la voz limpia. Adivina qué es voz sin inteligencia artificial, así que siempre deja algo del beat. Más limpieza quita más, pero la voz suena más metálica.</p>
         </div>
       </div>
     </section>
@@ -346,6 +361,7 @@ let busy = false;
 let player = { src: null, playing: false };
 let ab = null;           // {before, after} tras masterizar, para comparar
 let abOrig = false;
+let acap = null, acapName = "";  // voz limpia sacada con IA
 
 /* ---------- Buffer helpers ---------- */
 const mk = (ch, len, sr) => new AudioBuffer({ numberOfChannels: ch, length: Math.max(1, len), sampleRate: sr });
@@ -810,8 +826,127 @@ function runVocal(L, R, rate, clean, onProg) {
     w.postMessage({ L, R, rate, clean }, [L.buffer, R.buffer]);
   });
 }
+/* Alinear la voz limpia con la canción: correlación cruzada (FFT) a ~2 kHz. */
+function fftN(re, im, inv) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = ((inv ? 2 : -2) * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang), h = len >> 1;
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let j = 0; j < h; j++) {
+        const a = i + j, b = a + h;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+      }
+    }
+  }
+}
+function downMono(c0, c1, a, b, f) {
+  const n = Math.floor((b - a) / f), o = new Float64Array(n);
+  for (let k = 0; k < n; k++) { let s = 0; for (let i = a + k * f, e = i + f; i < e; i++) s += c0[i] + c1[i]; o[k] = s / (2 * f); }
+  return o;
+}
+function findOffset(m0, m1, s0, s1, v0, v1, rate) {
+  const f = Math.max(1, Math.round(rate / 2000)), len = m0.length;
+  let w0 = s0, w1 = s1;
+  const minW = 6 * rate;
+  if (w1 - w0 < minW) { w0 = Math.max(0, Math.round((s0 + s1) / 2 - minW / 2)); w1 = Math.min(len, w0 + minW); }
+  w1 = Math.min(w1, w0 + 30 * rate);
+  const a = downMono(m0, m1, w0, w1, f), b = downMono(v0, v1, 0, v0.length, f);
+  let n = 1; while (n < a.length + b.length) n <<= 1;
+  const ar = new Float64Array(n), ai = new Float64Array(n), br = new Float64Array(n), bi = new Float64Array(n);
+  ar.set(a); br.set(b);
+  fftN(ar, ai, false); fftN(br, bi, false);
+  for (let k = 0; k < n; k++) {  // conj(A) * B
+    const r = ar[k] * br[k] + ai[k] * bi[k], i = ar[k] * bi[k] - ai[k] * br[k];
+    ar[k] = r; ai[k] = i;
+  }
+  fftN(ar, ai, true);
+  const okLag = (k) => { const lag = k < n - a.length ? k : k - n; return lag > b.length - 1 || lag < -(a.length - 1) ? null : lag; };
+  let best = -Infinity;
+  for (let k = 0; k < n; k++) if (okLag(k) !== null && ar[k] > best) best = ar[k];
+  // Un coro repetido cuadra en varios sitios: entre los que cuadran casi igual, se queda con el más cercano a su sitio en la canción.
+  let L = 0, bestDist = Infinity;
+  for (let k = 0; k < n; k++) {
+    const lag = okLag(k);
+    if (lag === null || ar[k] < 0.9 * best) continue;
+    const dist = Math.abs(lag * f - w0);
+    if (dist < bestDist) { bestDist = dist; L = lag; }
+  }
+  best = Math.max(best, 0);
+  for (let k = 0; k < n; k++) if (okLag(k) === L) { best = ar[k]; break; }
+  let ea = 0, eb = 0;
+  for (let i = 0; i < a.length; i++) { ea += a[i] * a[i]; const j = i + L; if (j >= 0 && j < b.length) eb += b[j] * b[j]; }
+  const score = best / n / Math.sqrt(ea * eb + 1e-20);
+  // Ajuste fino muestra por muestra alrededor de lo encontrado.
+  let off = L * f - w0, bestDot = -Infinity, fine = off;
+  const r0 = Math.max(s0, w0), r1 = Math.min(r0 + 2 * rate, w1);
+  for (let d = off - 2 * f; d <= off + 2 * f; d++) {
+    let dot = 0;
+    for (let i = r0; i < r1; i++) { const j = i + d; if (j >= 0 && j < v0.length) dot += (m0[i] + m1[i]) * (v0[j] + v1[j]); }
+    if (dot > bestDot) { bestDot = dot; fine = d; }
+  }
+  return { offset: fine, score };
+}
+async function loadAcap(file) {
+  if (!file) return;
+  if (!buf) { toast("Primero abre la canción"); return; }
+  setBusy(true, "Cargando la voz…");
+  try {
+    const b = await ac().decodeAudioData(await file.arrayBuffer());
+    acap = await matchRate(b, sr());
+    acapName = file.name;
+    const st = $("#acapStatus");
+    st.textContent = `Voz limpia: ${file.name} (${fmt(acap.duration)}). Ahora "Solo la voz" la usa.`;
+    st.classList.add("ok");
+    toast("Voz limpia cargada");
+  } catch (e) {
+    console.error(e);
+    toast(`No pude abrir "${file.name}". Tiene que ser audio en MP3, M4A, WAV o AAC.`, 6000);
+  } finally { setBusy(false); }
+}
+function clearAcap() {
+  acap = null; acapName = "";
+  const st = $("#acapStatus");
+  st.textContent = "Voz limpia: no cargada. Sin ella se usa el modo rápido, que deja algo del beat.";
+  st.classList.remove("ok");
+}
+async function applyAcap(mode) {
+  const [s0, s1] = range(), rate = sr();
+  setBusy(true, "Buscando dónde va la voz…");
+  await new Promise((r) => setTimeout(r, 30));
+  try {
+    const { offset, score } = findOffset(buf.getChannelData(0), buf.getChannelData(1), s0, s1, acap.getChannelData(0), acap.getChannelData(1), rate);
+    if (!(score > 0.2)) {
+      toast("Esa voz no cuadra con esta parte de la canción. Revisa que sea la voz de esta misma canción.", 6000);
+      return;
+    }
+    const o = mk(2, buf.length, rate), fade = sel ? Math.round(rate * 0.02) : 0;
+    for (let c = 0; c < 2; c++) {
+      const d = o.getChannelData(c), src = buf.getChannelData(c), v = acap.getChannelData(c);
+      d.set(src);
+      for (let i = s0; i < s1; i++) {
+        const j = i + offset, vv = j >= 0 && j < v.length ? v[j] : 0;
+        const proc = mode === "solo" ? vv : src[i] - vv;
+        const w = fade ? Math.min(1, (i - s0) / fade, (s1 - 1 - i) / fade) : 1;
+        d[i] = src[i] * (1 - w) + proc * w;
+      }
+    }
+    commit(o, mode === "solo" ? "Listo: solo la voz limpia" : "Listo: sin voz", sel);
+  } catch (e) {
+    console.error(e); toast("No se pudo poner la voz", 4000);
+  } finally { setBusy(false); }
+}
 async function doVocal(mode) {
   if (!buf || busy) return;
+  if (acap) return applyAcap(mode);
   const [s0, s1] = range();
   if (s1 - s0 < 2) return;
   const rate = sr(), pad = 8192, a0 = Math.max(0, s0 - pad), a1 = Math.min(buf.length, s1 + pad);
@@ -834,7 +969,8 @@ async function doVocal(mode) {
         d[i] = src[i] * (1 - w) + proc * w;
       }
     }
-    commit(o, mode === "solo" ? "Listo: solo la voz" : "Listo: sin voz", sel);
+    commit(o, mode === "solo" ? "Modo rápido: queda algo del beat. Carga la voz limpia para que quede sola." : "Listo: sin voz (modo rápido)", sel);
+    toast(mode === "solo" ? "Modo rápido: queda algo del beat. Carga la voz limpia para que quede sola." : "Listo: sin voz (modo rápido)", 5000);
   } catch (e) {
     console.error(e); toast("No se pudo separar la voz en este teléfono", 4000);
   } finally {
@@ -859,7 +995,7 @@ async function loadFile(file, append) {
       baseName = file.name.replace(/\.[^.]+$/, "") || "audio";
       $("#fname").textContent = file.name;
       undoStack = []; redoStack = []; sel = null; cursor = 0; zoom = 1;
-      ab = null; abOrig = false; $("#meter").hidden = true;
+      ab = null; abOrig = false; $("#meter").hidden = true; clearAcap();
       peaksKey = null; layout(); refresh();
       toast("Canción cargada");
     }
@@ -939,7 +1075,7 @@ async function loadSample() {
     buf = await makeSample();
     baseName = "ejemplo-dembow"; $("#fname").textContent = "ejemplo-dembow.wav";
     undoStack = []; redoStack = []; cursor = 0; zoom = 1;
-    ab = null; abOrig = false; $("#meter").hidden = true;
+    ab = null; abOrig = false; $("#meter").hidden = true; clearAcap();
     sel = { a: 60 / 118 * 8, b: 60 / 118 * 16 }; // compases 3 y 4 seleccionados, para probar
     peaksKey = null; layout(); refresh();
   } finally { setBusy(false); }
@@ -1255,6 +1391,7 @@ for (const p of MASTER) {
 }
 $("#lufsIn").addEventListener("input", showLufs);
 $("#masterBtn").onclick = masterize;
+$("#acapIn").addEventListener("change", (e) => { loadAcap(e.target.files[0]); e.target.value = ""; });
 $("#voxOnlyBtn").onclick = () => doVocal("solo");
 $("#voxOutBtn").onclick = () => doVocal("sin");
 $("#voxClean").addEventListener("input", (e) => { $("#voxCleanOut").textContent = (+e.target.value).toFixed(1); });
