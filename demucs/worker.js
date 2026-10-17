@@ -7,6 +7,8 @@ ort.env.wasm.wasmPaths = new URL("../ort/", import.meta.url).href;
 ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)) : 1;
 
 const RATE = 44100;
+// Gastar la menor memoria posible: los teléfonos cierran la página si se pasa.
+const LOW_MEM = { enableCpuMemArena: false, enableMemPattern: false, executionMode: "sequential", graphOptimizationLevel: "basic" };
 
 class HTDemucs {
   sources = ["drums", "bass", "other", "vocals"];
@@ -42,36 +44,38 @@ async function downloadModel() {
     const url = new URL(part.file, base).href;
     let res = null;
     try { res = cache ? await cache.match(url) : null; } catch { res = null; }
-    let bytes;
-    if (res) {
-      bytes = new Uint8Array(await res.arrayBuffer());
-      if (bytes.length !== part.size) { res = null; try { await cache.delete(url); } catch {} }
-    }
-    if (!res) {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`No se pudo bajar la inteligencia artificial (error ${r.status})`);
-      bytes = new Uint8Array(part.size);
+    // Se escribe directo en el arreglo final, sin copias de más (en el teléfono la memoria es justa).
+    const dest = all.subarray(got, got + part.size);
+    const fill = async (r) => {
       const reader = r.body.getReader();
       let o = 0;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         if (o + value.length > part.size) throw new Error("La descarga llegó dañada");
-        bytes.set(value, o);
+        dest.set(value, o);
         o += value.length;
         post({ type: "progress", phase: "download", p: (got + o) / man.total, total: man.total });
       }
-      if (o !== part.size) throw new Error("La descarga se cortó. Revisa el internet y vuelve a intentar.");
-      if (cache) { try { await cache.put(url, new Response(bytes)); } catch {} }
+      return o;
+    };
+    if (res) {
+      const o = await fill(res).catch(() => -1);
+      if (o !== part.size) { res = null; try { await cache.delete(url); } catch {} }
     }
-    all.set(bytes, got);
+    if (!res) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`No se pudo bajar la inteligencia artificial (error ${r.status})`);
+      if ((await fill(r)) !== part.size) throw new Error("La descarga se cortó. Revisa el internet y vuelve a intentar.");
+      if (cache) { try { await cache.put(url, new Response(dest)); } catch {} }
+    }
     got += part.size;
     post({ type: "progress", phase: "download", p: got / man.total, total: man.total });
   }
   return all;
 }
 
-async function loadModel() {
+async function loadModel(allowCpu) {
   const bytes = await downloadModel();
   post({ type: "progress", phase: "load", p: 0 });
   const model = new HTDemucs();
@@ -80,22 +84,25 @@ async function loadModel() {
   try { gpu = navigator.gpu ? await navigator.gpu.requestAdapter() : null; } catch { gpu = null; }
   if (gpu) {
     try {
-      model.session = await ort.InferenceSession.create(bytes, { executionProviders: ["webgpu"] });
+      model.session = await ort.InferenceSession.create(bytes, { ...LOW_MEM, executionProviders: ["webgpu"] });
       device = "gpu";
     } catch (e) {
       console.warn("WebGPU no funcionó, uso el procesador", e);
     }
   }
-  if (!model.session) model.session = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] });
+  if (!model.session) {
+    if (!allowCpu) throw new Error("este teléfono no pudo usar la tarjeta gráfica, y sin ella la inteligencia artificial no cabe en la memoria. Úsala en una computadora o carga la voz limpia.");
+    model.session = await ort.InferenceSession.create(bytes, { ...LOW_MEM, executionProviders: ["wasm"] });
+  }
   return { model, device };
 }
 
 let modelP = null;
 
 self.onmessage = async (e) => {
-  const { L, R } = e.data;
+  const { L, R, allowCpu } = e.data;
   try {
-    if (!modelP) modelP = loadModel();
+    if (!modelP) modelP = loadModel(allowCpu !== false);
     let ready;
     try { ready = await modelP; } catch (err) { modelP = null; throw err; }
     const { model, device } = ready;

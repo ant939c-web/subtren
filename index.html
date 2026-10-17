@@ -432,12 +432,21 @@ async function matchRate(b, rate) {
 }
 
 /* ---------- History ---------- */
+// Teléfono: memoria justa. Cada paso de deshacer guarda la canción entera, así que se limita por tamaño.
+const IS_PHONE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform || ""));
+const HISTORY_BYTES = (IS_PHONE ? 250 : 1200) * 1e6;
+function trimHistory() {
+  const size = (e) => e.buf.length * e.buf.numberOfChannels * 4;
+  let total = undoStack.reduce((n, e) => n + size(e), 0) + redoStack.reduce((n, e) => n + size(e), 0);
+  while (undoStack.length > 1 && (total > HISTORY_BYTES || undoStack.length > 30)) total -= size(undoStack.shift());
+  while (redoStack.length > 1 && total > HISTORY_BYTES) total -= size(redoStack.shift());
+}
 function commit(nb, msg, newSel) {
   stopPlayback();
   ab = null; abOrig = false;
   undoStack.push({ buf, sel, cursor });
-  if (undoStack.length > 30) undoStack.shift();
   redoStack = [];
+  trimHistory();
   buf = nb;
   sel = newSel === undefined ? null : newSel;
   if (sel && sel.b - sel.a < 0.001) sel = null;
@@ -935,10 +944,11 @@ async function loadAcap(file) {
     toast(`No pude abrir "${file.name}". Tiene que ser audio en MP3, M4A, WAV o AAC.`, 6000);
   } finally { setBusy(false); }
 }
+let acapDefaultMsg = "Voz limpia: no cargada. Sin ella se usa el modo rápido, que deja algo del beat.";
 function clearAcap() {
   acap = null; acapName = "";
   const st = $("#acapStatus");
-  st.textContent = "Voz limpia: no cargada. Sin ella se usa el modo rápido, que deja algo del beat.";
+  st.textContent = acapDefaultMsg;
   st.classList.remove("ok");
   $("#acapStatus2").hidden = true;
 }
@@ -971,9 +981,22 @@ async function applyAcap(mode) {
 /* ---------- Inteligencia artificial (Demucs) ----------
    Solo existe en la página web: busca modelo/manifest.json junto a la página. */
 let aiOK = false, aiWorker = null, aiPending = null, aiCache = null;
+const AI_PHONE_MAX = 30; // segundos por vez en el teléfono
+let aiGPU = false;
 fetch("modelo/manifest.json")
   .then((r) => (r.ok ? r.json() : null))
-  .then((m) => { if (m && m.parts && "Worker" in window) { aiOK = true; showAIUI(); } })
+  .then(async (m) => {
+    if (!m || !m.parts || !("Worker" in window)) return;
+    try { aiGPU = !!(navigator.gpu && (await navigator.gpu.requestAdapter())); } catch { aiGPU = false; }
+    if (IS_PHONE && !aiGPU) {
+      // Sin tarjeta gráfica (WebGPU) la IA no cabe en la memoria de un teléfono y se cierra la página.
+      const st = $("#acapStatus");
+      st.textContent = acapDefaultMsg = "Este teléfono no puede correr la inteligencia artificial aquí (le falta WebGPU, que viene en iOS 26 o más nuevo). Úsala en una computadora, o carga la voz limpia sacada con Moises.";
+      return;
+    }
+    aiOK = true; showAIUI();
+    if (IS_PHONE) $("#aiStatus").textContent = `Inteligencia artificial: lista. En el teléfono separa hasta ${AI_PHONE_MAX} segundos por vez. La primera vez baja 174 MB.`;
+  })
   .catch(() => {});
 function showAIUI() {
   $("#aiBox").hidden = !aiOK;
@@ -1004,7 +1027,7 @@ function runAI(L, R, onProg) {
         else if (m.type === "error") { aiPending = null; reject(new Error(m.message)); }
       },
     };
-    getAIWorker().postMessage({ L, R }, [L.buffer, R.buffer]);
+    getAIWorker().postMessage({ L, R, allowCpu: !IS_PHONE }, [L.buffer, R.buffer]);
   });
 }
 function cancelAI() {
@@ -1020,6 +1043,10 @@ async function resample2(L, R, from, to) {
 }
 async function applyAI(mode) {
   const [s0, s1] = range(), rate = sr(), margin = Math.round(rate * 1);
+  if (IS_PHONE && (s1 - s0) / rate > AI_PHONE_MAX) {
+    toast(sel ? `En el teléfono, selecciona ${AI_PHONE_MAX} segundos o menos (tienes ${Math.round((s1 - s0) / rate)} s).` : `En el teléfono, primero selecciona el pedazo (hasta ${AI_PHONE_MAX} segundos) arrastrando sobre la onda.`, 6000);
+    return;
+  }
   const a0 = Math.max(0, s0 - margin), a1 = Math.min(buf.length, s1 + margin);
   const box = $("#aiRun"), bar = $("#voxProgAI").firstElementChild, msg = $("#aiMsg");
   const show = (text, p) => { msg.textContent = text; bar.style.width = Math.round(p * 100) + "%"; $("#busy").textContent = text; };
@@ -1030,7 +1057,7 @@ async function applyAI(mode) {
     if (!st) {
       const [L, R] = await resample2(buf.getChannelData(0).slice(a0, a1), buf.getChannelData(1).slice(a0, a1), rate, 44100);
       const t0 = performance.now();
-      const r = await runAI(L.slice(), R.slice(), (m) => {
+      const r = await runAI(L, R, (m) => {
         if (m.phase === "download") show(`Bajando la inteligencia artificial (solo la primera vez): ${Math.round(m.p * 100)}% de ${Math.round(m.total / 1e6)} MB`, m.p);
         else if (m.phase === "load") show("Preparando la inteligencia artificial…", 1);
         else {
